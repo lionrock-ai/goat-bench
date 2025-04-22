@@ -1,0 +1,83 @@
+# @package _global_
+
+defaults:
+  - /habitat: habitat_config_base
+  - /habitat/simulator/agents@habitat.simulator.agents.main_agent: rgb_agent
+  - /habitat/task: task_config_base
+  - /habitat/task/actions:
+    - stop
+    - move_forward
+    - turn_left
+    - turn_right
+    - look_up
+    - look_down
+    - subtask_stop
+  - /habitat/task/measurements:
+    - distance_to_goal
+    - success
+    - spl
+    - soft_spl
+    - goat_distance_to_goal_reward
+  - /habitat/task/lab_sensors:
+    - goat_goal_sensor
+    - compass_sensor
+    - gps_sensor
+    - current_subtask_sensor
+  - _self_
+
+habitat:
+  env_task: GymGoatEnv
+  environment:
+    max_episode_steps: 5000
+
+  task:
+    type: Goat-v1
+    success_measure: success
+    reward_measure: goat_distance_to_goal_reward
+
+    actions:
+      subtask_stop:
+        type: SubtaskStopAction
+    
+    lab_sensors:
+      goat_goal_sensor:
+        object_cache: data/goat-assets/goal_cache/ovon/category_name_clip_embeddings.pkl
+        image_cache: data/goat-assets/goal_cache/iin/train_embeddings/
+        image_cache_encoder: CLIP_goat
+        language_cache: data/goat-assets/goal_cache/language_nav/train_instruction_clip_embeddings.pkl
+
+    measurements:
+      distance_to_goal:
+        type: GoatDistanceToGoal
+        distance_to: "VIEW_POINTS"
+      spl:
+        type: GoatSPL
+      soft_spl:
+        type: GoatSoftSPL
+      success:
+        type: GoatSuccess
+        success_distance: 0.25 
+
+  simulator:
+    type: GOATSim-v0
+    turn_angle: 30
+    tilt_angle: 30
+    action_space_config: "v2-goat"
+    agents:
+      main_agent:
+        sim_sensors:
+          rgb_sensor:
+            width: 360
+            height: 640
+            hfov: 42
+            position: [0, 1.31, 0]
+        height: 1.41
+        radius: 0.17
+    habitat_sim_v0:
+      gpu_device_id: 0
+      allow_sliding: False
+  
+  dataset:
+    type: Goat-v1
+    split: train
+    data_path: data/datasets/goat_bench/v1/{split}/{split}.json.gz

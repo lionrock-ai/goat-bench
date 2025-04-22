@@ -31,6 +31,23 @@ if TYPE_CHECKING:
     from omegaconf import DictConfig
 
 
+import logging
+
+# 创建一个 logger
+logger = logging.getLogger('my_logger')
+logger.setLevel(logging.DEBUG)  # 设置日志级别
+
+# 创建一个文件处理器，用于将日志输出到文件
+file_handler = logging.FileHandler('app.log')
+file_handler.setLevel(logging.DEBUG)  # 设置文件处理器的日志级别
+
+# 创建一个格式器，并将其添加到处理器
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+
+# 将处理器添加到 logger
+logger.addHandler(file_handler)
+
 @baseline_registry.register_trainer(name="goat_ddppo")
 @baseline_registry.register_trainer(name="goat_ppo")
 class GoatPPOTrainer(PPOTrainer):
@@ -297,16 +314,16 @@ class GoatPPOTrainer(PPOTrainer):
                 if len(self.config.habitat_baselines.eval.video_option) > 0:
                     # TODO move normalization / channel changing out of the policy and undo it here
                     frame = observations_to_image(
-                        {k: v[i] for k, v in vis_batch.items() if "rgb" in k},
-                        {
-                            "top_down_map": {
-                                k.split(".")[-1]: v
-                                for k, v in infos[i].items()
-                                if "top_down_map" in k
-                            }
-                        },
+                        {k: v[i] for k, v in vis_batch.items() if "rgb" in k}, {}
+                        # {
+                        #     "top_down_map": {
+                        #         k.split(".")[-1]: v
+                        #         for k, v in infos[i].items()
+                        #         if "top_down_map" in k
+                        #     }
+                        # },
                     )
-                    print("Info: {}".format(infos[i].keys()))
+                    # print("Info: {}".format(infos[i].keys()))
                     if not not_done_masks[i].item():
                         # The last frame corresponds to the first frame of the next episode
                         # but the info is correct. So we use a black frame
@@ -315,14 +332,14 @@ class GoatPPOTrainer(PPOTrainer):
                                 k: v[i] * 0.0
                                 for k, v in vis_batch.items()
                                 if "rgb" in k
-                            },
-                            {
-                                "top_down_map": {
-                                    k.split(".")[-1]: v
-                                    for k, v in infos[i].items()
-                                    if "top_down_map" in k
-                                }
-                            },
+                            }, {}
+                            # {
+                            #     "top_down_map": {
+                            #         k.split(".")[-1]: v
+                            #         for k, v in infos[i].items()
+                            #         if "top_down_map" in k
+                            #     }
+                            # },
                         )
                     # frame = overlay_frame(frame, infos[i])
                     rgb_frames[i].append(frame)
@@ -350,16 +367,16 @@ class GoatPPOTrainer(PPOTrainer):
                     episode_state_copy["episode_id"] = current_episodes_info[
                         i
                     ].episode_id
-                    episode_state_copy["subtasks"] = current_episodes_info[
-                        i
-                    ].tasks
+                    # episode_state_copy["subtasks"] = current_episodes_info[
+                    #     i
+                    # ].tasks
                     episode_state_copy["success_by_subtask"] = infos[i][
                         "success.subtask_success"
                     ]
                     episode_state_copy["spl_by_subtaskl"] = infos[i][
                         "spl.spl_by_subtask"
                     ]
-                    print("episode_state_copy", current_episodes_info[i].tasks)
+                    # print("episode_state_copy", current_episodes_info[i].tasks)
                     episode_state_copy["actions"] = saved_actions[i]
                     episode_metrics.append(episode_state_copy)
 
