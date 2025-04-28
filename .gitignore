@@ -8,6 +8,7 @@ __pycache__/
 # environment
 variables.sh
 habitat-lab
+eai-vc
 
 # development
 .idea

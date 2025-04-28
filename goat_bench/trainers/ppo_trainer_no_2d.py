@@ -2,6 +2,11 @@ import copy
 import os
 from collections import defaultdict, deque
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
+import gzip
+import json
+from pathlib import Path
+import cv2
+import uuid
 
 import numpy as np
 import torch
@@ -30,23 +35,41 @@ from goat_bench.utils.utils import write_json
 if TYPE_CHECKING:
     from omegaconf import DictConfig
 
+class EpisodeData:
+    """根据scene_id和episode_id来获取episode的相关信息，采取lazy loading的方式
+    """
 
-import logging
+    data_path: str
 
-# 创建一个 logger
-logger = logging.getLogger('my_logger')
-logger.setLevel(logging.DEBUG)  # 设置日志级别
+    def __init__(self):
+        self.data = {}
 
-# 创建一个文件处理器，用于将日志输出到文件
-file_handler = logging.FileHandler('app.log')
-file_handler.setLevel(logging.DEBUG)  # 设置文件处理器的日志级别
+    def get(self, scene_id: str, episode_id: str):
+        scene_id = os.path.basename(scene_id).split(".")[0]
+        episode_id = int(episode_id)
 
-# 创建一个格式器，并将其添加到处理器
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(formatter)
+        if scene_id not in self.data:
+            with open(f"{self.data_path}/content/{scene_id}.json", 'rb') as f:
+                data = json.load(f)
+                self.data[scene_id] = data['episodes']
+        
+        return self.data[scene_id][episode_id]
 
-# 将处理器添加到 logger
-logger.addHandler(file_handler)
+    def set_data_path(self, data_path: str):
+        self.data_path = os.path.dirname(data_path)
+
+episode_data = EpisodeData()
+first_episode_key = None
+
+def write_image(image, path: str) -> str:
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    filename = path / f"{uuid.uuid4()}.jpg"
+    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(str(filename), image)
+    return filename.name
+
+
 
 @baseline_registry.register_trainer(name="goat_ddppo")
 @baseline_registry.register_trainer(name="goat_ppo")
@@ -70,8 +93,11 @@ class GoatPPOTrainer(PPOTrainer):
         if self._is_distributed:
             raise RuntimeError("Evaluation does not support distributed mode")
 
+        episode_data.set_data_path(self.config.habitat.dataset.data_path)
+
         # Map location CPU is almost always better than mapping to a CUDA device.
         if self.config.habitat_baselines.eval.should_load_ckpt:
+            # ckpt_dict里面存储的主要是模型参数
             ckpt_dict = self.load_checkpoint(
                 checkpoint_path, map_location="cpu"
             )
@@ -93,6 +119,8 @@ class GoatPPOTrainer(PPOTrainer):
             and len(self.config.habitat_baselines.eval.video_option) > 0
         ):
             agent_config = get_agent_config(config.habitat.simulator)
+            # 传感器的配置
+            # 文档： https://aihabitat.org/docs/habitat-sim/habitat_sim.sensor.CameraSensorSpec.html
             agent_sensors = agent_config.sim_sensors
             render_view_uuids = [
                 agent_sensors[render_view].uuid
@@ -202,13 +230,46 @@ class GoatPPOTrainer(PPOTrainer):
         logger.info("Starting eval episodes")
 
         episode_metrics = []
+        eval_info = {} # 导出我们需要的信息
+
+        # Evaluation的主循环
         while (
             len(stats_episodes) < (number_of_eval_episodes * evals_per_ep)
             and self.envs.num_envs > 0
         ):
+            # 这里为了方便，我们先固定num_envs=1
+            if self.envs.num_envs != 1:
+                raise ValueError(
+                    f"num_envs should be 1, but got {self.envs.num_envs}"
+                )
+            # Example:
+            # current_episodes_info = [BaseEpisode(episode_id='7', scene_id='data/scene_datasets/hm3d/val//00802-wcojb4TFT35/wcojb4TFT35.basis.glb')]
             current_episodes_info = self.envs.current_episodes()
+            episode_key = (
+                current_episodes_info[0].scene_id, current_episodes_info[0].episode_id)
+            global first_episode_key
+            if first_episode_key is None:
+                first_episode_key = episode_key
+            else:
+                if episode_key != first_episode_key:
+                    logger.info('调试过程中，只执行一个episode')
+                    break
 
+            if episode_key[0] not in eval_info:
+                eval_info[episode_key[0]] = {
+                }
+            if episode_key[1] not in eval_info[episode_key[0]]:
+                eval_info[episode_key[0]][episode_key[1]] = {
+                    'steps': [],
+                    **episode_data.get(*episode_key)
+                }
             with inference_mode():
+                # 这里的actions包含了过去的动作和即将要执行的动作
+                # Example: actions = tensor([[0, 1, 2, 1]])
+                # batch则是当前的observation
+                # Example: batch = {'compass': tensor([2.1]), 'gps': tensor([1.1, -0.2]), ''  }
+                # 
+                # 
                 (
                     _,
                     actions,
@@ -221,7 +282,6 @@ class GoatPPOTrainer(PPOTrainer):
                     not_done_masks,
                     deterministic=False,
                 )
-
                 prev_actions.copy_(actions)  # type: ignore
 
             if self.config.habitat_baselines.ablate_memory:
@@ -281,9 +341,18 @@ class GoatPPOTrainer(PPOTrainer):
                 observations,
                 device=self.device,
             )
+            # batch的图像之后会进行变换，所以这里要备份一下原始的batch
             vis_batch = {k: v.clone() for k, v in batch.items() if "rgb" in k}
             batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
 
+
+            eval_info[episode_key[0]][episode_key[1]]['steps'].append({
+                'rgb': write_image(vis_batch['rgb'][0].cpu().numpy(), 'frames'),
+                'action': actions[0].cpu().tolist()[-1],
+                'gps': batch['gps'][0].cpu().tolist(),
+                'compass': batch['compass'][0].cpu().tolist(),
+            })
+            
             not_done_masks = torch.tensor(
                 [[not done] for done in dones],
                 dtype=torch.bool,
@@ -323,7 +392,6 @@ class GoatPPOTrainer(PPOTrainer):
                         #     }
                         # },
                     )
-                    # print("Info: {}".format(infos[i].keys()))
                     if not not_done_masks[i].item():
                         # The last frame corresponds to the first frame of the next episode
                         # but the info is correct. So we use a black frame
@@ -344,7 +412,7 @@ class GoatPPOTrainer(PPOTrainer):
                     # frame = overlay_frame(frame, infos[i])
                     rgb_frames[i].append(frame)
 
-                # episode ended
+                # 如果episode结束了
                 if not not_done_masks[i].item():
                     pbar.update()
                     episode_stats = {"reward": current_episode_reward[i].item()}
@@ -373,6 +441,9 @@ class GoatPPOTrainer(PPOTrainer):
                     episode_state_copy["success_by_subtask"] = infos[i][
                         "success.subtask_success"
                     ]
+
+                    eval_info[episode_key[0]][episode_key[1]]['success_by_subtask'] = [bool(i) for i in episode_state_copy["success_by_subtask"]]
+
                     episode_state_copy["spl_by_subtaskl"] = infos[i][
                         "spl.spl_by_subtask"
                     ]
@@ -401,6 +472,12 @@ class GoatPPOTrainer(PPOTrainer):
                         write_gfx_replay(
                             gfx_str,
                             self.config.habitat.task,
+        #     episode_metrics,
+        #     os.path.join(
+        #         self.config.habitat_baselines.tensorboard_dir,
+        #         "episode_metrics.json",
+        #     ),
+        # )
                             current_episodes_info[i].episode_id,
                         )
 
@@ -425,37 +502,48 @@ class GoatPPOTrainer(PPOTrainer):
             )
 
         pbar.close()
-        assert (
-            len(ep_eval_count) >= number_of_eval_episodes
-        ), f"Expected {number_of_eval_episodes} episodes, got {len(ep_eval_count)}."
+        # assert (
+        #     len(ep_eval_count) >= number_of_eval_episodes
+        # ), f"Expected {number_of_eval_episodes} episodes, got {len(ep_eval_count)}."
 
-        aggregated_stats = {}
-        for stat_key in next(iter(stats_episodes.values())).keys():
-            aggregated_stats[stat_key] = np.mean(
-                [v[stat_key] for v in stats_episodes.values() if stat_key in v]
-            )
+        # aggregated_stats = {}
+        # for stat_key in next(iter(stats_episodes.values())).keys():
+        #     aggregated_stats[stat_key] = np.mean(
+        #         [v[stat_key] for v in stats_episodes.values() if stat_key in v]
+        #     )
 
-        for k, v in aggregated_stats.items():
-            logger.info(f"Average episode {k}: {v:.4f}")
+        # for k, v in aggregated_stats.items():
+        #     logger.info(f"Average episode {k}: {v:.4f}")
 
-        step_id = checkpoint_index
-        if "extra_state" in ckpt_dict and "step" in ckpt_dict["extra_state"]:
-            step_id = ckpt_dict["extra_state"]["step"]
+        # step_id = checkpoint_index
+        # if "extra_state" in ckpt_dict and "step" in ckpt_dict["extra_state"]:
+        #     step_id = ckpt_dict["extra_state"]["step"]
 
-        writer.add_scalar(
-            "eval_reward/average_reward", aggregated_stats["reward"], step_id
-        )
+        # writer.add_scalar(
+        #     "eval_reward/average_reward", aggregated_stats["reward"], step_id
+        # )
 
-        metrics = {k: v for k, v in aggregated_stats.items() if k != "reward"}
-        for k, v in metrics.items():
-            writer.add_scalar(f"eval_metrics/{k}", v, step_id)
+        # metrics = {k: v for k, v in aggregated_stats.items() if k != "reward"}
+        # for k, v in metrics.items():
+        #     writer.add_scalar(f"eval_metrics/{k}", v, step_id)
 
-        write_json(
-            episode_metrics,
-            os.path.join(
-                self.config.habitat_baselines.tensorboard_dir,
-                "episode_metrics.json",
-            ),
-        )
+        # write_json(
+        #     episode_metrics,
+        #     os.path.join(
+        #         self.config.habitat_baselines.tensorboard_dir,
+        #         "episode_metrics.json",
+        #     ),
+        # )
 
+        with open('eval_info.json', 'w') as f:
+            json.dump(eval_info, f, indent=4)
+        # write_json(
+        #     eval_info,
+        #     os.path.join(
+        #         self.config.habitat_baselines.tensorboard_dir,
+        #         "eval_info.json",
+        #     ),
+        # )
+
+        raise RuntimeError('Debugging中，eval_info已经保存到文件中')
         self.envs.close()

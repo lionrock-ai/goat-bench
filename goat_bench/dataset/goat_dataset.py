@@ -75,6 +75,18 @@ class GoatDatasetV1(PointNavDatasetV1):
         self.goals = {}
         super().__init__(config)
         self.episodes = list(self.episodes)
+        # if len(self.episodes):
+        #     epi = self.episodes[0]
+        #     print(vars(epi).keys())
+        #     print(epi.start_position)
+        #     print(epi.start_rotation)
+        #     print(epi.goals[0][0]['lang_desc'])
+        #     print(epi.goals[0][1]['lang_desc'])
+        #     print(epi.tasks[0][0])
+        #     print(epi.tasks[0][1])
+        #     print(len(epi.goals))
+        #     print([len(i) for i in epi.goals])
+        #     raise NotImplementedError()
 
     @staticmethod
     def __deserialize_objectnav_goal(
